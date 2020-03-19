@@ -162,6 +162,40 @@ export default class Session extends Locator<
     });
   }
 
+  private _runForSelectedWindow<T>(
+    windowHandle: string | undefined,
+    callback: () => Promise<T>
+  ) {
+    if (windowHandle == null) {
+      return callback();
+    } else {
+      // User provided a window handle; get the current handle,
+      // switch to the new one, get the position, then switch back to
+      // the original handle.
+      let error: Error;
+      let returnValue: T;
+      return this.getCurrentWindowHandle().then(originalHandle => {
+        return this.switchToWindow(windowHandle)
+          .then(callback)
+          .then(
+            _returnValue => {
+              returnValue = _returnValue;
+            },
+            _error => {
+              error = _error;
+            }
+          )
+          .then(() => this.switchToWindow(originalHandle))
+          .then(() => {
+            if (error) {
+              throw error;
+            }
+            return returnValue;
+          });
+      });
+    }
+  }
+
   /**
    * Cancel the in-progress operation and any chained operations.
    */
@@ -202,9 +236,14 @@ export default class Session extends Locator<
    * @returns The timeout, in milliseconds.
    */
   getTimeout(type: Timeout): Promise<number> {
-    if (this.capabilities.supportsGetTimeouts) {
-      return this.serverGet<WebDriverTimeouts>('timeouts').then(timeouts =>
-        type === 'page load' ? timeouts.pageLoad : timeouts[type]
+    if (this.capabilities.supportsGetTimeouts !== false) {
+      return this.serverGet<WebDriverTimeouts>('timeouts').then(
+        timeouts => (type === 'page load' ? timeouts.pageLoad : timeouts[type]),
+        _error => {
+          this.capabilities.supportsGetTimeouts = false;
+          // Use fallback
+          return this.getTimeout(type);
+        }
       );
     } else {
       return this._timeouts[type];
@@ -236,19 +275,23 @@ export default class Session extends Locator<
     }
 
     // Set both JSONWireProtocol and WebDriver properties in the data object
-    const data = this.capabilities.usesWebDriverTimeouts
-      ? {
-          [type === 'page load' ? 'pageLoad' : type]: ms
-        }
-      : {
-          type,
-          ms
-        };
+    const data =
+      this.capabilities.usesWebDriverTimeouts !== false
+        ? {
+            [type === 'page load' ? 'pageLoad' : type]: ms
+          }
+        : {
+            type,
+            ms
+          };
 
     const promise = this.serverPost<void>('timeouts', data).catch(error => {
       // Appium as of April 2014 complains that `timeouts` is
       // unsupported, so try the more specific endpoints if they exist
-      if (error.name === 'UnknownCommand') {
+      if (
+        this.capabilities.usesWebDriverTimeouts === false &&
+        error.name === 'UnknownCommand'
+      ) {
         if (type === 'script') {
           return this.serverPost<void>('timeouts/async_script', {
             ms: ms
@@ -259,15 +302,24 @@ export default class Session extends Locator<
           });
         }
       } else if (
-        !this.capabilities.usesWebDriverTimeouts &&
-        // At least Chrome 60+
-        (/Missing 'type' parameter/.test(error.message) ||
-          // At least Safari 10+
-          /Unknown timeout type/.test(error.message) ||
-          // IE11
-          /Invalid timeout type specified/.test(error.message))
+        this.capabilities.usesWebDriverTimeouts == null &&
+        // Validate inputs before marking webdriver as broken
+        ['implicit', 'page load', 'script'].includes(type) &&
+        Number.isFinite(ms) &&
+        ms >= 0
+        // &&
+        // // At least Chrome 60+
+        // (/Missing 'type' parameter/.test(error.message) ||
+        //   // At least Safari 10+
+        //   /Unknown timeout type/.test(error.message) ||
+        //   // IE11
+        //   /Invalid timeout type specified/.test(error.message))
       ) {
-        this.capabilities.usesWebDriverTimeouts = true;
+        intern.log(
+          'Error setting timeouts, falling back to JSONWireProtocol',
+          error
+        );
+        this.capabilities.usesWebDriverTimeouts = false;
         return this.setTimeout(type, ms);
       }
 
@@ -627,12 +679,32 @@ export default class Session extends Locator<
    * the `window.name` property of a window.
    */
   switchToWindow(handle: string) {
-    // const handleProperty = this.capabilities.=== 'selendroid' &&
-    let data: { [key: string]: string } = { name: handle };
-    if (this.capabilities.usesHandleParameter) {
-      data = { handle };
-    }
-    return this.serverPost<void>('window', data);
+    const handleProperty =
+      this.capabilities.usesHandleParameter === false ? 'name' : 'handle';
+    const data = { [handleProperty]: handle };
+
+    return this.serverPost<void>('window', data).catch(error => {
+      if (this.capabilities.usesHandleParameter == null) {
+        // This determines the capability by running the command again with the name parameter
+        // This assumes that the command can be run again without issue
+        // The original capability check tried running the JsonWireProtocal command on 'current'
+        // first and if that errored, checked the error to see if the server requires the handle param
+        //      error.name === 'InvalidArgument' ||
+        //      /missing .*handle/i.test(error.message)
+        // Note: we cannot trust the inputted handle is valid
+        // This also never sets the capability to true
+
+        // Check if JsonWireProtocol works
+        return this.serverPost<void>('window', { name: handle }).then(
+          () => (this.capabilities.usesHandleParameter = false),
+          () => {
+            throw error;
+          }
+        );
+      }
+
+      throw error;
+    });
   }
 
   /**
@@ -729,8 +801,8 @@ export default class Session extends Locator<
 
     const data = { width, height };
 
-    if (this.capabilities.usesWebDriverWindowCommands) {
-      const setWindowSize = () =>
+    if (this.capabilities.usesWebDriverWindowCommands !== false) {
+      return this._runForSelectedWindow(windowHandle, () =>
         this.getWindowPosition().then(position =>
           this.setWindowRect({
             // At least Firefox + geckodriver 0.17.0 requires all 4 rect
@@ -740,29 +812,16 @@ export default class Session extends Locator<
             width: data.width,
             height: data.height
           })
-        );
-
-      if (windowHandle == null) {
-        return setWindowSize();
-      } else {
-        // User provided a window handle; get the current handle,
-        // switch to the new one, get the size, then switch back to the
-        // original handle.
-        let error: Error;
-        return this.getCurrentWindowHandle().then(originalHandle => {
-          return this.switchToWindow(windowHandle)
-            .then(() => setWindowSize())
-            .catch(_error => {
-              error = _error;
-            })
-            .then(() => this.switchToWindow(originalHandle))
-            .then(() => {
-              if (error) {
-                throw error;
-              }
-            });
-        });
-      }
+        )
+      ).catch(error => {
+        if (this.capabilities.usesWebDriverWindowCommands == null) {
+          return this.setWindowSize(...(args as [any, any, any])).then(() => {
+            this.capabilities.usesWebDriverWindowCommands = false;
+          });
+        } else {
+          throw error;
+        }
+      });
     } else {
       if (windowHandle == null) {
         windowHandle = 'current';
@@ -783,42 +842,24 @@ export default class Session extends Locator<
    * @returns An object describing the width and height of the window, in CSS
    * pixels.
    */
-  getWindowSize(windowHandle?: string) {
-    if (this.capabilities.usesWebDriverWindowCommands) {
-      const getWindowSize = () =>
+  getWindowSize(
+    windowHandle?: string
+  ): Promise<{ width: number; height: number }> {
+    if (this.capabilities.usesWebDriverWindowCommands !== false) {
+      return this._runForSelectedWindow(windowHandle, () =>
         this.getWindowRect().then(rect => ({
           width: rect.width,
           height: rect.height
-        }));
-
-      if (windowHandle == null) {
-        return getWindowSize();
-      } else {
-        // User provided a window handle; get the current handle,
-        // switch to the new one, get the size, then switch back to the
-        // original handle.
-        let error: Error;
-        let size: { width: number; height: number };
-        return this.getCurrentWindowHandle().then(originalHandle => {
-          return this.switchToWindow(windowHandle!)
-            .then(() => getWindowSize())
-            .then(
-              _size => {
-                size = _size;
-              },
-              _error => {
-                error = _error;
-              }
-            )
-            .then(() => this.switchToWindow(originalHandle))
-            .then(() => {
-              if (error) {
-                throw error;
-              }
-              return size;
-            });
-        });
-      }
+        }))
+      ).catch(error => {
+        if (this.capabilities.usesWebDriverWindowCommands) {
+          this.capabilities.usesWebDriverWindowCommands = true;
+          // retry using fallback
+          return this.getWindowSize(windowHandle);
+        } else {
+          throw error;
+        }
+      });
     } else {
       if (windowHandle == null) {
         windowHandle = 'current';
@@ -878,37 +919,23 @@ export default class Session extends Locator<
       windowHandle = null;
     }
 
-    if (this.capabilities.usesWebDriverWindowCommands) {
+    if (this.capabilities.usesWebDriverWindowCommands !== false) {
       // At least Firefox + geckodriver 0.17.0 requires all 4 rect
       // parameters have values
       return this.getWindowSize().then(size => {
         const data = { x, y, width: size.width, height: size.height };
 
-        if (windowHandle == null) {
-          return this.setWindowRect(data);
-        } else {
-          // User provided a window handle; get the current handle,
-          // switch to the new one, get the size, then switch back to the
-          // original handle.
-          let error: Error;
-          return this.getCurrentWindowHandle().then(originalHandle => {
-            if (originalHandle === windowHandle) {
-              this.setWindowRect(data);
-            } else {
-              return this.switchToWindow(windowHandle)
-                .then(() => this.setWindowRect(data))
-                .catch(_error => {
-                  error = _error;
-                })
-                .then(() => this.switchToWindow(originalHandle))
-                .then(() => {
-                  if (error) {
-                    throw error;
-                  }
-                });
-            }
-          });
-        }
+        return this._runForSelectedWindow(windowHandle, () =>
+          this.setWindowRect(data)
+        ).catch(error => {
+          if (error === 'TODO: Some command error') {
+            this.capabilities.usesWebDriverWindowCommands = true;
+            // retry using fallback
+            return this.getWindowPosition(windowHandle);
+          } else {
+            throw error;
+          }
+        });
       });
     } else {
       if (windowHandle == null) {
@@ -934,41 +961,19 @@ export default class Session extends Locator<
    * monitor exists above or to the left of the primary monitor, these values
    * will be negative.
    */
-  getWindowPosition(windowHandle?: string) {
-    if (this.capabilities.usesWebDriverWindowCommands) {
-      const getWindowPosition = () =>
-        this.getWindowRect().then(({ x, y }) => {
-          return { x, y };
-        });
-
-      if (windowHandle == null) {
-        return getWindowPosition();
-      } else {
-        // User provided a window handle; get the current handle,
-        // switch to the new one, get the position, then switch back to
-        // the original handle.
-        let error: Error;
-        let position: { x: number; y: number };
-        return this.getCurrentWindowHandle().then(originalHandle => {
-          return this.switchToWindow(windowHandle!)
-            .then(() => getWindowPosition())
-            .then(
-              _position => {
-                position = _position;
-              },
-              _error => {
-                error = _error;
-              }
-            )
-            .then(() => this.switchToWindow(originalHandle))
-            .then(() => {
-              if (error) {
-                throw error;
-              }
-              return position;
-            });
-        });
-      }
+  getWindowPosition(windowHandle?: string): Promise<{ x: number; y: number }> {
+    if (this.capabilities.usesWebDriverWindowCommands !== false) {
+      return this._runForSelectedWindow(windowHandle, () =>
+        this.getWindowRect().then(({ x, y }) => ({ x, y }))
+      ).catch(error => {
+        if (error === 'TODO: Some command error') {
+          this.capabilities.usesWebDriverWindowCommands = true;
+          // retry using fallback
+          return this.getWindowPosition(windowHandle);
+        } else {
+          throw error;
+        }
+      });
     } else {
       if (typeof windowHandle === 'undefined') {
         windowHandle = 'current';
@@ -995,30 +1000,18 @@ export default class Session extends Locator<
    * Omit this argument to resize the currently focused window.
    */
   maximizeWindow(windowHandle?: string) {
-    if (this.capabilities.usesWebDriverWindowCommands) {
-      const maximizeWindow = () => this.serverPost<void>('window/maximize');
-
-      if (windowHandle == null) {
-        return maximizeWindow();
-      } else {
-        // User provided a window handle; get the current handle,
-        // switch to the new one, get the position, then switch back to
-        // the original handle.
-        let error: Error;
-        return this.getCurrentWindowHandle().then(originalHandle => {
-          return this.switchToWindow(windowHandle!)
-            .then(() => maximizeWindow())
-            .catch(_error => {
-              error = _error;
-            })
-            .then(() => this.switchToWindow(originalHandle))
-            .then(() => {
-              if (error) {
-                throw error;
-              }
-            });
-        });
-      }
+    if (this.capabilities.usesWebDriverWindowCommands !== false) {
+      return this._runForSelectedWindow(windowHandle, () =>
+        this.serverPost<void>('window/maximize')
+      ).catch(error => {
+        if (error === 'TODO: Some command error') {
+          this.capabilities.usesWebDriverWindowCommands = true;
+          // retry using fallback
+          return this.getWindowSize(windowHandle);
+        } else {
+          throw error;
+        }
+      });
     } else {
       if (typeof windowHandle === 'undefined') {
         windowHandle = 'current';
@@ -1396,18 +1389,31 @@ export default class Session extends Locator<
    * or send `\uE000` ('NULL') to deactivate all currently active modifier
    * keys.
    */
-  pressKeys(keys: string | string[]) {
+  pressKeys(keys: string | string[]): Promise<void> {
     if (!Array.isArray(keys)) {
       keys = [keys];
     }
 
-    if (this.capabilities.brokenSendKeys || this.capabilities.noKeysCommand) {
+    if (!this.capabilities.brokenSendKeys && !this.capabilities.noKeysCommand) {
+      return this.serverPost<void>('keys', {
+        value: keys
+      }).catch(error => {
+        // Check that the error was not due to invalid input
+        return this.serverPost<void>('keys', { value: ['a'] }).then(
+          _success => {
+            // Error was due to input
+            throw error;
+          },
+          _error => {
+            this.capabilities.noKeysCommand = true;
+            return this.pressKeys(keys);
+          }
+        );
+      });
+    } else {
+      // Use fallback
       return this.execute<void>(simulateKeys, [keys]);
     }
-
-    return this.serverPost<void>('keys', {
-      value: keys
-    });
   }
 
   /**

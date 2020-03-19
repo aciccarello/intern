@@ -55,12 +55,20 @@ export interface Capabilities {
   brokenFileSendKeys?: boolean;
   brokenFlickFinger?: boolean;
   brokenHtmlMouseMove?: boolean;
+  /**
+   * Some environments incorrectly return HTML tag names in
+   * uppercase, which is a violation of the JsonWireProtocol spec
+   */
   brokenHtmlTagName?: boolean;
   brokenLinkTextLocator?: boolean;
   brokenLongTap?: boolean;
   brokenMouseEvents?: boolean;
   brokenMoveFinger?: boolean;
   brokenNavigation?: boolean;
+  /**
+   * Some environments incorrectly return an empty
+   * string instead of null for attributes that do not exist
+   */
   brokenNullGetSpecAttribute?: boolean;
   brokenOptionSelect?: boolean;
   brokenPageSource?: boolean;

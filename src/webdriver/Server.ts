@@ -11,7 +11,7 @@ import {
   RequestMethod,
   Response
 } from '../common';
-import Session, { WebDriverTimeouts } from './Session';
+import Session from './Session';
 import Element from './Element';
 import statusCodes from './lib/statusCodes';
 import { format, parse, resolve, Url } from 'url';
@@ -954,6 +954,7 @@ export default class Server {
       // Check that the remote server will accept file uploads. There is
       // a secondary test in discoverDefects that checks whether the
       // server allows typing into file inputs.
+      // Not checked within intern
       if (capabilities.remoteFiles == null) {
         intern.log('Checking for remoteFiles...');
         testedCapabilities.remoteFiles = () =>
@@ -974,6 +975,7 @@ export default class Server {
             .then(logResult('remoteFiles'));
       }
 
+      // Not checked within intern
       if (capabilities.supportsSessionCommand == null) {
         intern.log('Checking supportsSessionCommands...');
         testedCapabilities.supportsSessionCommands = () =>
@@ -982,64 +984,9 @@ export default class Server {
             .then(logResult('supportsSessionCommands'));
       }
 
-      if (capabilities.supportsGetTimeouts == null) {
-        intern.log('Checking supportsGetTimeouts...');
-        testedCapabilities.supportsGetTimeouts = () => {
-          return session
-            .serverGet('timeouts')
-            .then(supported, unsupported)
-            .then(logResult('supportsGetTimeouts'));
-        };
-      }
-
-      if (capabilities.usesWebDriverTimeouts == null) {
-        intern.log('Checking usesWebDriverTimeouts...');
-        testedCapabilities.usesWebDriverTimeouts = () => {
-          return (
-            session
-              // Try to set a timeout using W3C semantics
-              .serverPost<void>('timeouts', { implicit: 1234 })
-              .then(() => {
-                // Verify that the timeout was set
-                return session
-                  .serverGet<WebDriverTimeouts>('timeouts')
-                  .then(timeouts => {
-                    return timeouts.implicit === 1234;
-                  })
-                  .catch(unsupported);
-              }, unsupported)
-              .then(logResult('usesWebDriverTimeouts'))
-          );
-        };
-      }
-
-      if (capabilities.usesWebDriverWindowCommands == null) {
-        intern.log('Checking usesWebDriverWindowCommands...');
-        testedCapabilities.usesWebDriverWindowCommands = () =>
-          session
-            .serverGet('window/rect')
-            .then(supported, unsupported)
-            .then(logResult('usesWebDriverWindowCommands'));
-      }
-
-      // The W3C standard says window commands should take a 'handle'
-      // parameter, while the JsonWireProtocol used a 'name' parameter.
-      if (capabilities.usesHandleParameter == null) {
-        intern.log('Checking usesHandleParameter...');
-        testedCapabilities.usesHandleParameter = () =>
-          session
-            .switchToWindow('current')
-            .then(
-              unsupported,
-              error =>
-                error.name === 'InvalidArgument' ||
-                /missing .*handle/i.test(error.message)
-            )
-            .then(logResult('usesHandleParameter'));
-      }
-
       // Sauce Labs will not return a list of sessions at least as of May
       // 2017
+      // Not checked within intern
       if (capabilities.brokenSessionList == null) {
         intern.log('Checking brokenSessionList...');
         testedCapabilities.brokenSessionList = () =>
@@ -1048,6 +995,7 @@ export default class Server {
             .then(logResult('brokenSessionList'));
       }
 
+      // Not checked within intern
       if (capabilities.returnsFromClickImmediately == null) {
         intern.log('Checking returnsFromClickImmediately...');
         testedCapabilities.returnsFromClickImmediately = () => {
@@ -1076,21 +1024,8 @@ export default class Server {
         };
       }
 
-      // The W3C WebDriver standard does not support the session-level
-      // /keys command, but JsonWireProtocol does.
-      if (capabilities.noKeysCommand == null) {
-        intern.log('Checking noKeysCommand...');
-        testedCapabilities.noKeysCommand = () =>
-          session
-            .serverPost('keys', { value: ['a'] })
-            .then(
-              () => false,
-              () => true
-            )
-            .then(logResult('noKeysCommand'));
-      }
-
       // The W3C WebDriver standard does not support the /displayed endpoint
+      // Not checked within intern
       if (capabilities.noElementDisplayed == null) {
         intern.log('Checking noElementDisplayed...');
         testedCapabilities.noElementDisplayed = () =>
@@ -1186,6 +1121,7 @@ export default class Server {
             .then(logResult('applicationCacheEnabled'));
       }
 
+      // Not checked within intern
       if (capabilities.takesScreenshot == null) {
         // At least Selendroid 0.9.0 will fail to take screenshots in
         // certain device configurations, usually emulators with
@@ -1200,6 +1136,7 @@ export default class Server {
 
       // At least ios-driver 0.6.6-SNAPSHOT April 2014 does not support
       // execute_async
+      // Not checked within intern
       if (capabilities.supportsExecuteAsync == null) {
         intern.log('Checking supportsExecuteAsync...');
         testedCapabilities.supportsExecuteAsync = () =>
@@ -1210,7 +1147,7 @@ export default class Server {
       }
 
       // Using mouse services such as doubleclick will hang Firefox 49+
-      // session on the Mac.
+      // session on the Mac
       if (
         capabilities.mouseEnabled == null &&
         !(isFirefox(capabilities, 49, Infinity) && isMac(capabilities))
